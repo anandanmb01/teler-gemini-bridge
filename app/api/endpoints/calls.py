@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import contextlib
 import json
 import logging
 
@@ -7,13 +8,16 @@ from fastapi import (APIRouter, HTTPException, WebSocket, WebSocketDisconnect,
                      status)
 from fastapi.responses import JSONResponse
 from fastapi.websockets import WebSocketState
+from google import genai
+from google.genai import types
 from pydantic import BaseModel
 
 from app.core.config import settings
-from app.utils.gemini_client import GeminiClient
+from app.utils.audio_resampler import AudioResampler
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+audio_resampler = AudioResampler()
 
 class CallFlowRequest(BaseModel):
     call_id: str
@@ -88,13 +92,8 @@ async def handle_media_stream(websocket: WebSocket):
         if not settings.google_api_key:
             await websocket.close(code=1008, reason="GOOGLE_API_KEY not configured")
             return
-        
-        # Initialize Gemini client
-        gemini_client = GeminiClient(
-            api_key=settings.google_api_key,
-            model=settings.gemini_model,
-            system_message=settings.gemini_system_message
-        )
+
+        gemini_client = genai.Client(api_key=settings.google_api_key)
         
         # Create Gemini session directly using the client
         config = {
@@ -102,76 +101,100 @@ async def handle_media_stream(websocket: WebSocket):
             "system_instruction": settings.gemini_system_message,
         }
         
-        async with gemini_client.client.aio.live.connect(model=settings.gemini_model, config=config) as session:
+        async with gemini_client.aio.live.connect(model=settings.gemini_model, config=config) as session:
             logger.info("Successfully connected to Gemini Live session")
             
-            # Simple list to buffer audio chunks from Gemini
+            # Audio buffering for Gemini output
             gemini_audio_chunks = []
             chunk_id = 1
 
-            async def handle_media_stream():
-                """Handle bidirectional audio streaming between Teler and Gemini"""
+            async def teler_stream():
+                """Receive audio from Teler and send to Gemini"""
+                try:
+                    async for message in websocket.iter_text():
+                        data = json.loads(message)
+                        
+                        if data.get("type") == "audio":
+                            try:
+                                # Decode and send PCM audio to Gemini (16kHz)
+                                pcm_data = base64.b64decode(data["data"]["audio_b64"])
+                                await session.send_realtime_input(
+                                    audio=types.Blob(data=pcm_data, mime_type="audio/pcm;rate=16000")
+                                )
+                                logger.debug(f"Sent audio to Gemini ({len(pcm_data)} bytes)")
+                            except Exception as e:
+                                logger.error(f"Error sending audio to Gemini: {e}")
+                                
+                except WebSocketDisconnect:
+                    logger.info("Teler WebSocket disconnected")
+                except Exception as e:
+                    logger.error(f"Error in teler stream: {e}")
+
+            async def gemini_stream():
+                """Receive audio from Gemini and send to Teler"""
                 nonlocal chunk_id, gemini_audio_chunks
                 
-                async def process_teler_to_gemini():
-                    """Receive audio from Teler and send to Gemini"""
-                    while True:
-                        data = json.loads(await websocket.receive_text())
-                        if data.get("type") == "audio":
-                            audio_b64 = data["data"]["audio_b64"]
-                            logger.debug("Received audio chunk from Teler")
+                try:
+                    while True:  # Keep the stream alive indefinitely
+                        try:
+                            async for response in session.receive():
+                                # Process audio data
+                                if response.data is not None:
+                                    gemini_audio_chunks.append(response.data)
+                                    logger.debug(f"Received audio chunk ({len(response.data)} bytes)")
+                                    
+                                    # Send buffered audio when we have enough chunks
+                                    if len(gemini_audio_chunks) >= settings.gemini_audio_chunk_count:
+                                        try:
+                                            # Combine, downsample, and send audio
+                                            combined_audio = b"".join(gemini_audio_chunks)
+                                            downsampled_data = audio_resampler.downsample(combined_audio, 24000)
+                                            downsampled_b64 = base64.b64encode(downsampled_data).decode('utf-8')
 
-                            try:
-                                # Decode PCM audio from Teler (16kHz, 16-bit)
-                                pcm_data = base64.b64decode(audio_b64)
+                                            await websocket.send_json({
+                                                "type": "audio",
+                                                "audio_b64": downsampled_b64,
+                                                "chunk_id": chunk_id
+                                            })
+                                            logger.debug(f"Sent audio to Teler (chunk {chunk_id})")
+                                            
+                                            # Reset buffer and increment chunk ID
+                                            gemini_audio_chunks = []
+                                            chunk_id += 1
+                                            
+                                        except Exception as e:
+                                            logger.error(f"Error processing audio chunks: {e}")
                                 
-                                # Send to Gemini (no resampling needed since both are 16kHz)
-                                await gemini_client.send_audio_to_gemini(session, pcm_data)
+                                # Handle turn completion - continue waiting for next turn
+                                if (response.server_content and 
+                                    (getattr(response.server_content, 'turn_complete', False) or 
+                                     getattr(response.server_content, 'generation_complete', False))):
+                                    logger.debug("Turn/generation completed - waiting for next")
+                                    
+                        except Exception as session_error:
+                            logger.debug(f"Session iteration ended: {session_error}")
+                            await asyncio.sleep(0.1)  # Brief pause before continuing
+                            continue
+                            
+                except Exception as e:
+                    logger.error(f"Error in gemini stream: {e}")
 
-                            except Exception as e:
-                                logger.error(f"Audio processing error: {e}")
+            # Run both streams concurrently
+            done, pending = await asyncio.wait(
+                [
+                    asyncio.create_task(teler_stream()),
+                    asyncio.create_task(gemini_stream()),
+                ],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            
+            # Cancel remaining tasks
+            for task in pending:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
-                async def process_gemini_to_teler():
-                    """Receive audio from Gemini and send to Teler"""
-                    nonlocal chunk_id, gemini_audio_chunks
-                    
-                    async for audio_data in gemini_client.receive_audio_from_gemini(session):
-                        # Add chunk to buffer
-                        gemini_audio_chunks.append(audio_data)
-                        
-                        # Check if we have enough chunks to send
-                        if len(gemini_audio_chunks) >= settings.gemini_audio_chunk_count:
-                            try:
-                                # Combine all buffered chunks
-                                combined_audio = b"".join(gemini_audio_chunks)
-
-                                # Downsample from 24kHz to 8kHz for Teler
-                                downsampled_data = gemini_client.audio_resampler.downsample(combined_audio, 24000)
-
-                                # Encode to base64 for Teler
-                                downsampled_b64 = base64.b64encode(downsampled_data).decode('utf-8')
-
-                                await websocket.send_json({
-                                    "type": "audio",
-                                    "audio_b64": downsampled_b64,
-                                    "chunk_id": chunk_id
-                                })
-                                logger.debug(f"Sent downsampled PCM16 audio to Teler (chunk {chunk_id}, size: {len(downsampled_data)} bytes)")
-                                
-                                # Reset buffer and increment chunk ID
-                                gemini_audio_chunks = []
-                                chunk_id += 1
-                                
-                            except Exception as e:
-                                logger.error(f"Error processing chunks: {e}")
-
-                # Start both tasks concurrently
-                teler_to_gemini_task = asyncio.create_task(process_teler_to_gemini())
-                gemini_to_teler_task = asyncio.create_task(process_gemini_to_teler())
-
-                await asyncio.gather(teler_to_gemini_task, gemini_to_teler_task)
-
-            await handle_media_stream()
+            logger.info("Bridge closed")
             
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected.")

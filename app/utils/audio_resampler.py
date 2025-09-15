@@ -2,8 +2,6 @@ import logging
 
 import numpy as np
 from scipy import signal
-from google import genai
-from google.genai import types
 
 logger = logging.getLogger(__name__)
 
@@ -86,63 +84,3 @@ class AudioResampler:
         except Exception as e:
             logger.error(f"Error upsampling audio: {e}")
             return audio_data
-
-
-class GeminiClient:
-    """Client for interacting with Gemini Live API"""
-    
-    def __init__(self, api_key: str, model: str = "gemini-2.5-flash-preview-native-audio-dialog", 
-                 system_message: str = "You are a friendly and helpful AI voice assistant on a phone call. Be concise and clear."):
-        self.api_key = api_key
-        self.model = model
-        self.system_message = system_message
-        # Initialize client with API key
-        self.client = genai.Client(api_key=api_key)
-        self.audio_resampler = AudioResampler()
-        self.audio_chunk_count = 5  # Number of audio chunks to buffer before sending to Gemini
-        
-    
-    async def send_audio_to_gemini(self, session, audio_data: bytes):
-        """
-        Send audio data to Gemini Live session.
-        
-        Args:
-            session: Gemini Live session
-            audio_data: Raw PCM audio data (16kHz from Teler)
-        """
-        try:
-            # Teler now sends 16kHz audio, which matches Gemini's input requirement
-            # No resampling needed for input
-            await session.send_realtime_input(
-                audio=types.Blob(data=audio_data, mime_type="audio/pcm;rate=16000")
-            )
-            logger.debug("Sent PCM16 audio to Gemini (16kHz)")
-            
-        except Exception as e:
-            logger.error(f"Error sending audio to Gemini: {e}")
-            raise
-    
-    async def receive_audio_from_gemini(self, session):
-        """
-        Receive audio data from Gemini Live session.
-        
-        Args:
-            session: Gemini Live session
-            
-        Yields:
-            Audio data chunks from Gemini
-        """
-        try:
-            async for response in session.receive():
-                if response.data is not None:
-                    # Gemini sends audio data (24kHz output)
-                    logger.debug(f"Received audio chunk from Gemini (size: {len(response.data)} bytes)")
-                    yield response.data
-                
-                # Handle other response types if needed
-                if response.server_content and response.server_content.model_turn is not None:
-                    logger.debug("Model response metadata received")
-                    
-        except Exception as e:
-            logger.error(f"Error receiving audio from Gemini: {e}")
-            raise
