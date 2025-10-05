@@ -3,7 +3,7 @@ run-name: teler-gemini-bridge API Img push
 on:
   push:
     branches:
-      - master
+      - main
 jobs:
   Explore-GitHub-Actions:
     runs-on: ubuntu-latest
