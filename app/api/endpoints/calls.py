@@ -112,7 +112,7 @@ async def handle_media_stream(websocket: WebSocket):
             "tools": tools
         }
         
-        async with gemini_client.aio.live.connect(model=settings.gemini_model, config=config) as session:
+        async with gemini_client.aio.live.connect(model=settings.gemini_model, config=config) as session: # type: ignore
             logger.info("Successfully connected to Gemini Live session")
 
             # Audio buffering for Gemini output
