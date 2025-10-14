@@ -94,7 +94,11 @@ async def handle_media_stream(websocket: WebSocket):
             return
 
         gemini_client = genai.Client(api_key=settings.google_api_key)
-        
+
+        # Define hangup function tool
+        hangup_call = {"name": "hangup_call", "description": "End the current phone call"}
+        tools = [{"function_declarations": [hangup_call]}]
+
         # Create Gemini session directly using the client
         config = {
             "response_modalities": ["AUDIO"],
@@ -102,11 +106,12 @@ async def handle_media_stream(websocket: WebSocket):
             "speech_config": {
                 "voice_config": {"prebuilt_voice_config": {"voice_name": "Aoede"}}
             },
+            "tools": tools
         }
         
         async with gemini_client.aio.live.connect(model=settings.gemini_model, config=config) as session:
             logger.info("Successfully connected to Gemini Live session")
-            
+
             # Audio buffering for Gemini output
             gemini_audio_chunks = []
             chunk_id = 1
@@ -141,11 +146,41 @@ async def handle_media_stream(websocket: WebSocket):
                     while True:  # Keep the stream alive indefinitely
                         try:
                             async for response in session.receive():
+                                # Handle tool calls (like hangup)
+                                if response.tool_call:
+                                    function_responses = []
+                                    hangup_requested = False
+
+                                    for fc in response.tool_call.function_calls:
+                                        if fc.name == "hangup_call":
+                                            function_response = types.FunctionResponse(
+                                                id=fc.id,
+                                                name=fc.name,
+                                                response={"result": "Call ended successfully"}
+                                            )
+                                            logger.info("Call hangup executed via tool call - will terminate WebSocket")
+                                            hangup_requested = True
+                                        else:
+                                            function_response = types.FunctionResponse(
+                                                id=fc.id,
+                                                name=fc.name,
+                                                response={"result": "Unknown function"}
+                                            )
+                                        function_responses.append(function_response)
+
+                                    # Send tool responses
+                                    await session.send_tool_response(function_responses=function_responses)
+
+                                    # If hangup was requested, close the connection
+                                    if hangup_requested:
+                                        await websocket.close(code=1000, reason="Call ended")
+                                        return
+
                                 # Process audio data
                                 if response.data is not None:
                                     gemini_audio_chunks.append(response.data)
                                     logger.debug(f"Received audio chunk ({len(response.data)} bytes)")
-                                    
+
                                     # Send buffered audio when we have enough chunks
                                     if len(gemini_audio_chunks) >= settings.gemini_audio_chunk_count:
                                         try:
@@ -160,17 +195,17 @@ async def handle_media_stream(websocket: WebSocket):
                                                 "chunk_id": chunk_id
                                             })
                                             logger.debug(f"Sent audio to Teler (chunk {chunk_id})")
-                                            
+
                                             # Reset buffer and increment chunk ID
                                             gemini_audio_chunks = []
                                             chunk_id += 1
-                                            
+
                                         except Exception as e:
                                             logger.error(f"Error processing audio chunks: {e}")
-                                
+
                                 # Handle turn completion - continue waiting for next turn
-                                if (response.server_content and 
-                                    (getattr(response.server_content, 'turn_complete', False) or 
+                                if (response.server_content and
+                                    (getattr(response.server_content, 'turn_complete', False) or
                                      getattr(response.server_content, 'generation_complete', False))):
                                     logger.debug("Turn/generation completed - waiting for next")
                                     
