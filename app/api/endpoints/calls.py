@@ -220,6 +220,9 @@ async def handle_media_stream(websocket: WebSocket):
                 except Exception as e:
                     logger.error(f"Error in gemini stream: {e}")
 
+            # initial user question
+            await session.send_realtime_input(text="hello who is this")
+
             # Run both streams concurrently
             done, pending = await asyncio.wait(
                 [
