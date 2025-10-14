@@ -19,9 +19,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 audio_resampler = AudioResampler()
 
-# Global variables for dynamic prompts
+# Global variables for dynamic prompts (loaded from settings/env)
 current_system_prompt = settings.gemini_system_message
-current_initial_prompt = ""
+current_initial_prompt = settings.gemini_initial_prompt
 
 class CallFlowRequest(BaseModel):
     call_id: str
@@ -94,7 +94,7 @@ async def initiate_call(call_request: CallRequest):
                 # Update with provided initial prompt
                 current_initial_prompt = call_request.initial_prompt
         else:
-            current_system_prompt = "hello who is this"
+            current_system_prompt = settings.gemini_initial_prompt
 
         logger.info(f"Updated prompts - System: {current_system_prompt[:50]}..., Initial: {current_initial_prompt[:50]}...")
         
