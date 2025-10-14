@@ -19,6 +19,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 audio_resampler = AudioResampler()
 
+# Global variables for dynamic prompts
+current_system_prompt = settings.gemini_system_message
+current_initial_prompt = ""
+
 class CallFlowRequest(BaseModel):
     call_id: str
     account_id: str
@@ -28,6 +32,8 @@ class CallFlowRequest(BaseModel):
 class CallRequest(BaseModel):
     from_number: str
     to_number: str
+    system_prompt: str = ""
+    initial_prompt: str = ""
 
 @router.post("/flow", status_code=status.HTTP_200_OK, include_in_schema=False)
 async def stream_flow(payload: CallFlowRequest):
@@ -55,14 +61,42 @@ async def initiate_call(call_request: CallRequest):
     """
     Initiate a call using Teler SDK.
     """
+    global current_system_prompt, current_initial_prompt
+
     try:
         from app.utils.teler_client import TelerClient
-        
+
         if not settings.google_api_key:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="GOOGLE_API_KEY not configured"
             )
+
+        # Handle system prompt updates
+        if call_request.system_prompt:
+            if call_request.system_prompt.lower() == "n/a":
+                # Use default system prompt when "n/a" is specified
+                current_system_prompt = settings.gemini_system_message
+            else:
+                # Update with provided system prompt
+                current_system_prompt = call_request.system_prompt
+        # If empty
+        else:
+            current_system_prompt = settings.gemini_system_message
+        
+
+        # Handle initial prompt updates
+        if call_request.initial_prompt:
+            if call_request.initial_prompt.lower() == "n/a":
+                # Clear initial prompt when "n/a" is specified
+                current_initial_prompt = ""
+            else:
+                # Update with provided initial prompt
+                current_initial_prompt = call_request.initial_prompt
+        else:
+            current_system_prompt = "hello who is this"
+
+        logger.info(f"Updated prompts - System: {current_system_prompt[:50]}..., Initial: {current_initial_prompt[:50]}...")
         
         teler_client = TelerClient(api_key=settings.teler_api_key)
         call = await teler_client.create_call(
@@ -125,7 +159,7 @@ async def handle_media_stream(websocket: WebSocket):
         # Create Gemini session directly using the client
         config = {
             "response_modalities": ["AUDIO"],
-            "system_instruction": settings.gemini_system_message,
+            "system_instruction": current_system_prompt,
             "speech_config": {
                 "voice_config": {"prebuilt_voice_config": {"voice_name": "Aoede"}}
             },
@@ -134,6 +168,11 @@ async def handle_media_stream(websocket: WebSocket):
         
         async with gemini_client.aio.live.connect(model=settings.gemini_model, config=config) as session: # type: ignore
             logger.info("Successfully connected to Gemini Live session")
+
+            # Send initial prompt if available
+            if current_initial_prompt:
+                await session.send_client_content(turns={"parts": [{"text": current_initial_prompt}]})
+                logger.info(f"Sent initial prompt: {current_initial_prompt[:50]}...")
 
             # Audio buffering for Gemini output
             gemini_audio_chunks = []
