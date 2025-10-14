@@ -96,7 +96,10 @@ async def handle_media_stream(websocket: WebSocket):
         gemini_client = genai.Client(api_key=settings.google_api_key)
 
         # Define hangup function tool
-        hangup_call = {"name": "hangup_call", "description": "End the current phone call"}
+        hangup_call = {
+            "name": "hangup_call",
+            "description": "Immediately terminate and end the current phone call conversation. Use this when you are done with the purpose of the call or user explicitly requests to hang up, end the call, or disconnect. This will close the connection and stop all audio streaming."
+        }
         tools = [{"function_declarations": [hangup_call]}]
 
         # Create Gemini session directly using the client
