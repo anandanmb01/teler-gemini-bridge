@@ -150,7 +150,7 @@ async def handle_media_stream(websocket: WebSocket):
                         try:
                             async for response in session.receive():
                                 # Handle tool calls (like hangup)
-                                if response.tool_call:
+                                if response.tool_call and response.tool_call.function_calls:
                                     function_responses = []
                                     hangup_requested = False
 
