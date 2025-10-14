@@ -73,7 +73,7 @@ async def initiate_call(call_request: CallRequest):
             record=True,
         )
         logger.info(f"Call created: {call}")
-        return JSONResponse(content={"success": True, "call": call})
+        return JSONResponse(content={"success": True})
     except Exception as e:
         logger.error(f"Failed to create call: {e}")
         raise HTTPException(
