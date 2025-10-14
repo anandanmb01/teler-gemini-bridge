@@ -73,7 +73,27 @@ async def initiate_call(call_request: CallRequest):
             record=True,
         )
         logger.info(f"Call created: {call}")
-        return JSONResponse(content={"success": True})
+
+        # Serialize call object by parsing all possible keys
+        call_data = {}
+        if hasattr(call, '__dict__'):
+            # Parse object attributes
+            for key, value in call.__dict__.items():
+                try:
+                    # Test if value is JSON serializable
+                    json.dumps(value)
+                    call_data[key] = value
+                except (TypeError, ValueError):
+                    # Convert non-serializable values to string
+                    call_data[key] = str(value)
+        elif isinstance(call, dict):
+            # Handle dictionary
+            call_data = call
+        else:
+            # Fallback: convert to string
+            call_data = {"call_info": str(call)}
+
+        return JSONResponse(content={"success": True, "call": call_data})
     except Exception as e:
         logger.error(f"Failed to create call: {e}")
         raise HTTPException(
