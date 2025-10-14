@@ -99,6 +99,9 @@ async def handle_media_stream(websocket: WebSocket):
         config = {
             "response_modalities": ["AUDIO"],
             "system_instruction": settings.gemini_system_message,
+            "speech_config": {
+                "voice_config": {"prebuilt_voice_config": {"voice_name": "Aoede"}}
+            },
         }
         
         async with gemini_client.aio.live.connect(model=settings.gemini_model, config=config) as session:
