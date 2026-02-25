@@ -94,7 +94,7 @@ async def initiate_call(call_request: CallRequest):
                 # Update with provided initial prompt
                 current_initial_prompt = call_request.initial_prompt
         else:
-            current_system_prompt = settings.gemini_initial_prompt
+            current_initial_prompt = settings.gemini_initial_prompt
 
         logger.info(f"Updated prompts - System: {current_system_prompt[:50]}..., Initial: {current_initial_prompt[:50]}...")
         
@@ -278,9 +278,6 @@ async def handle_media_stream(websocket: WebSocket):
                             
                 except Exception as e:
                     logger.error(f"Error in gemini stream: {e}")
-
-            # initial user question
-            await session.send_realtime_input(text="hello who is this")
 
             # Run both streams concurrently
             done, pending = await asyncio.wait(

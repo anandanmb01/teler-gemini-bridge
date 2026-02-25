@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = False
+        extra = "ignore"  # allow .env vars like SERVER_DOMAIN, NGROK_AUTHTOKEN not used as fields
 
 # Create settings instance
 settings = Settings()
