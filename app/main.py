@@ -46,18 +46,6 @@ async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "service": "teler-gemini-bridge"}
 
-@app.get("/ngrok-status")
-async def ngrok_status():
-    """Get current ngrok status and URL"""
-    from app.core.config import settings
-    from app.utils.ngrok_utils import get_current_ngrok_url
-    current_url = get_current_ngrok_url()
-    return {
-        "ngrok_running": current_url is not None,
-        "current_ngrok_url": f"https://{current_url}" if current_url else None,
-        "server_domain": settings.server_domain,
-        "fallback_domain": getattr(settings, '_server_domain_fallback', None)
-    }
 
 if __name__ == "__main__":
     import uvicorn
