@@ -10,7 +10,7 @@ from google import genai
 from google.genai import types
 
 from app.config import settings
-from app.utils import AudioResampler
+from app.utils.audio import AudioResampler
 
 logger = logging.getLogger(__name__)
 _audio_resampler = AudioResampler()
