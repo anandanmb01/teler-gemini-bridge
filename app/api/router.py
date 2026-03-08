@@ -1,10 +1,9 @@
 from fastapi import APIRouter
 
-from app.api.endpoints import calls, webhooks
+from app.api.calls import router as calls_router
+from app.api.webhooks import router as webhooks_router
 
-# Create main router
 router = APIRouter()
 
-# Include endpoint routers
-router.include_router(calls.router, prefix="/calls", tags=["calls"])
-router.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"])
+router.include_router(calls_router, prefix="/calls", tags=["calls"])
+router.include_router(webhooks_router, prefix="/webhooks", tags=["webhooks"])
