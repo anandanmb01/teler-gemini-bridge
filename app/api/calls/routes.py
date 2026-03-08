@@ -10,8 +10,8 @@ from fastapi.websockets import WebSocketState
 from google import genai
 from google.genai import types
 
-from app.core.config import settings
-from app.utils.audio_resampler import AudioResampler
+from app.core import settings
+from app.utils import AudioResampler
 from app.api.calls.models import CallFlowRequest, CallRequest
 
 logger = logging.getLogger(__name__)
@@ -46,7 +46,7 @@ async def initiate_call(call_request: CallRequest):
     global current_system_prompt, current_initial_prompt
 
     try:
-        from app.utils.teler_client import TelerClient
+        from app.utils import TelerClient
 
         if not settings.google_api_key:
             raise HTTPException(

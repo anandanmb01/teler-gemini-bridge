@@ -4,7 +4,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.router import router
+from app.api import router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,7 +30,7 @@ app.include_router(router, prefix="/api/v1")
 
 @app.get("/")
 async def root():
-    from app.core.config import settings
+    from app.core import settings
     return {
         "message": "Teler Gemini Bridge is running",
         "status": "healthy",
