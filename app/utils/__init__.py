@@ -1,4 +1,3 @@
-from app.utils.audio_resampler import AudioResampler
-from app.utils.teler_client import TelerClient
+from app.utils.audio import AudioResampler
 
-__all__ = ["AudioResampler", "TelerClient"]
+__all__ = ["AudioResampler"]

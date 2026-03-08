@@ -9,6 +9,5 @@ router = APIRouter()
 
 @router.post("/receiver", status_code=status.HTTP_200_OK, include_in_schema=False)
 async def webhook_receiver(data: dict):
-    """Log webhook payload from Teler."""
     logger.info(f"--------Webhook Payload-------- {data}")
     return JSONResponse(content="Webhook received.")
