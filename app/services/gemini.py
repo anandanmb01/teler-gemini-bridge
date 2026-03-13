@@ -17,7 +17,6 @@ from google.genai import types
 from scipy.signal import resample_poly
 
 from app.config import settings
-from app.utils.audio import AudioResampler
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +24,10 @@ _AUDIO_REC_DIR = "/tmp/audio_rec"
 _TRANSCRIPT_DIR = "/tmp/transcription"
 os.makedirs(_AUDIO_REC_DIR, exist_ok=True)
 os.makedirs(_TRANSCRIPT_DIR, exist_ok=True)
+
+# FFmpeg read size: 20ms of audio per direction
+_G2T_READ_SIZE = 320   # 8kHz  16-bit mono → 160 samples → 20ms
+_T2G_READ_SIZE = 640   # 16kHz 16-bit mono → 320 samples → 20ms
 
 
 def _run_transcript_writer(session_id: str, q: "_queue.Queue[str | None]") -> None:
@@ -36,7 +39,7 @@ def _run_transcript_writer(session_id: str, q: "_queue.Queue[str | None]") -> No
             logger.info(f"Transcript file opened: {path}")
             while True:
                 line = q.get()
-                if line is None:  # sentinel — session ended
+                if line is None:
                     break
                 f.write(line)
                 f.flush()
@@ -50,7 +53,7 @@ def _save_recording(session_id: str, teler_pcm: bytes, gemini_pcm: bytes) -> Non
     def _worker():
         try:
             os.makedirs(_AUDIO_REC_DIR, exist_ok=True)
-            logger.info(f"Saving recording for session={session_id} teler={len(teler_pcm)}B gemini={len(gemini_pcm)}B")
+            logger.info(f"Saving recording session={session_id} teler={len(teler_pcm)}B gemini={len(gemini_pcm)}B")
             teler = np.frombuffer(teler_pcm, dtype=np.int16).astype(np.float32)
             gemini_raw = np.frombuffer(gemini_pcm, dtype=np.int16).astype(np.float32)
             gemini = resample_poly(gemini_raw, 2, 3)  # 24kHz → 16kHz
@@ -83,9 +86,29 @@ _HANGUP_TOOL = types.FunctionDeclaration(
 )
 
 
+async def _start_ffmpeg(in_rate: int, out_rate: int) -> asyncio.subprocess.Process:
+    """Start an FFmpeg process that converts s16le PCM from in_rate to out_rate via stdio."""
+    return await asyncio.create_subprocess_exec(
+        "ffmpeg", "-hide_banner", "-loglevel", "quiet",
+        "-f", "s16le", "-ar", str(in_rate), "-ac", "1", "-i", "pipe:0",
+        "-f", "s16le", "-ar", str(out_rate), "-ac", "1", "pipe:1",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+
+
+async def _kill(proc: asyncio.subprocess.Process) -> None:
+    with contextlib.suppress(Exception):
+        proc.stdin.close()  # type: ignore[union-attr]
+    with contextlib.suppress(Exception):
+        proc.terminate()
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(proc.wait(), timeout=2)
+
+
 async def run_session(websocket: WebSocket, system_prompt: str, initial_prompt: str) -> None:
-    """Run a Gemini Live session bridged to a Teler WebSocket."""
-    resampler = AudioResampler()
+    """Run a Gemini Live session bridged to a Teler WebSocket via FFmpeg audio pipelines."""
     session_id = str(uuid.uuid4())
     teler_buf: bytearray = bytearray()
     gemini_buf: bytearray = bytearray()
@@ -95,10 +118,19 @@ async def run_session(websocket: WebSocket, system_prompt: str, initial_prompt: 
     )
     transcript_thread.start()
     logger.info(f"WebSocket connected. session={session_id}")
+
+    g2t_proc = t2g_proc = None  # FFmpeg processes — kept for cleanup in finally
+
     try:
         if not settings.google_api_key:
             await websocket.close(code=1008, reason="GOOGLE_API_KEY not configured")
             return
+
+        # Gemini 24kHz → 8kHz → Teler
+        g2t_proc = await _start_ffmpeg(in_rate=24000, out_rate=8000)
+        # Teler 16kHz → 16kHz → Gemini  (passthrough; ensures clean s16le format)
+        t2g_proc = await _start_ffmpeg(in_rate=16000, out_rate=16000)
+        logger.info("FFmpeg pipelines started")
 
         client = genai.Client(
             api_key=settings.google_api_key,
@@ -128,11 +160,11 @@ async def run_session(websocket: WebSocket, system_prompt: str, initial_prompt: 
                 await session.send_client_content(turns={"parts": [{"text": initial_prompt}]})
                 logger.info(f"Sent initial prompt: {initial_prompt[:50]}...")
 
-            audio_chunks: list[bytes] = []
+            gemini_speaking = False
             chunk_id = 1
-            gemini_speaking = False  # echo gate: True while Gemini is outputting audio
 
-            async def _teler_to_gemini():
+            # ── Teler → t2g FFmpeg stdin ─────────────────────────────────────
+            async def _teler_to_t2g():
                 try:
                     async for message in websocket.iter_text():
                         data = json.loads(message)
@@ -141,21 +173,37 @@ async def run_session(websocket: WebSocket, system_prompt: str, initial_prompt: 
                                 pcm = base64.b64decode(data["data"]["audio_b64"])
                                 teler_buf.extend(pcm)
                                 if not gemini_speaking:
-                                    await session.send_realtime_input(
-                                        audio=types.Blob(data=pcm, mime_type="audio/pcm")
-                                    )
-                                    logger.debug(f"Sent audio to Gemini ({len(pcm)} bytes)")
+                                    t2g_proc.stdin.write(pcm)  # type: ignore[union-attr]
+                                    await t2g_proc.stdin.drain()  # type: ignore[union-attr]
                                 else:
                                     logger.debug("Echo gate: dropping Teler audio while Gemini is speaking")
                             except Exception as e:
-                                logger.error(f"Error sending audio to Gemini: {e}")
+                                logger.error(f"Error writing to t2g FFmpeg: {e}")
                 except WebSocketDisconnect:
                     logger.info("Teler WebSocket disconnected")
                 except Exception as e:
-                    logger.error(f"Error in teler→gemini stream: {e}")
+                    logger.error(f"Error in teler→t2g: {e}")
+                finally:
+                    with contextlib.suppress(Exception):
+                        t2g_proc.stdin.close()  # type: ignore[union-attr]
 
-            async def _gemini_to_teler():
-                nonlocal chunk_id, audio_chunks, gemini_speaking
+            # ── t2g FFmpeg stdout → Gemini ────────────────────────────────────
+            async def _t2g_to_gemini():
+                try:
+                    while True:
+                        pcm = await t2g_proc.stdout.read(_T2G_READ_SIZE)  # type: ignore[union-attr]
+                        if not pcm:
+                            break
+                        await session.send_realtime_input(
+                            audio=types.Blob(data=pcm, mime_type="audio/pcm")
+                        )
+                        logger.debug(f"Sent {len(pcm)}B to Gemini")
+                except Exception as e:
+                    logger.error(f"Error in t2g→gemini: {e}")
+
+            # ── Gemini → g2t FFmpeg stdin ─────────────────────────────────────
+            async def _gemini_to_g2t():
+                nonlocal gemini_speaking
                 try:
                     while True:
                         try:
@@ -177,23 +225,9 @@ async def run_session(websocket: WebSocket, system_prompt: str, initial_prompt: 
                                 if response.data is not None:
                                     gemini_speaking = True
                                     gemini_buf.extend(response.data)
-                                    audio_chunks.append(response.data)
-                                    logger.debug(f"Received Gemini audio chunk ({len(response.data)} bytes)")
-
-                                    if len(audio_chunks) >= settings.gemini_audio_chunk_count:
-                                        try:
-                                            combined = b"".join(audio_chunks)
-                                            downsampled = resampler.downsample(combined)
-                                            await websocket.send_json({
-                                                "type": "audio",
-                                                "audio_b64": base64.b64encode(downsampled).decode(),
-                                                "chunk_id": chunk_id,
-                                            })
-                                            logger.debug(f"Sent audio to Teler (chunk {chunk_id})")
-                                            audio_chunks = []
-                                            chunk_id += 1
-                                        except Exception as e:
-                                            logger.error(f"Error processing audio chunks: {e}")
+                                    g2t_proc.stdin.write(response.data)  # type: ignore[union-attr]
+                                    await g2t_proc.stdin.drain()  # type: ignore[union-attr]
+                                    logger.debug(f"Wrote {len(response.data)}B to g2t FFmpeg")
 
                                 if response.server_content:
                                     sc = response.server_content
@@ -201,21 +235,45 @@ async def run_session(websocket: WebSocket, system_prompt: str, initial_prompt: 
                                         transcript_q.put(f"[Caller]: {sc.input_transcription.text}\n")
                                     if sc.output_transcription and sc.output_transcription.text:
                                         transcript_q.put(f"[Agent]: {sc.output_transcription.text}\n")
-                                    if getattr(sc, 'turn_complete', False):
-                                        # Turn complete — Gemini stopped speaking, open echo gate
+                                    if getattr(sc, "turn_complete", False):
                                         gemini_speaking = False
-                                        audio_chunks = []
-                                        logger.debug("Turn complete — echo gate open, audio buffer cleared")
+                                        logger.debug("Turn complete — echo gate open")
 
                         except Exception as e:
                             logger.debug(f"Session iteration ended: {e}")
                             await asyncio.sleep(0.1)
 
                 except Exception as e:
-                    logger.error(f"Error in gemini→teler stream: {e}")
+                    logger.error(f"Error in gemini→g2t: {e}")
+                finally:
+                    with contextlib.suppress(Exception):
+                        g2t_proc.stdin.close()  # type: ignore[union-attr]
+
+            # ── g2t FFmpeg stdout → Teler ─────────────────────────────────────
+            async def _g2t_to_teler():
+                nonlocal chunk_id
+                try:
+                    while True:
+                        pcm = await g2t_proc.stdout.read(_G2T_READ_SIZE)  # type: ignore[union-attr]
+                        if not pcm:
+                            break
+                        await websocket.send_json({
+                            "type": "audio",
+                            "audio_b64": base64.b64encode(pcm).decode(),
+                            "chunk_id": chunk_id,
+                        })
+                        chunk_id += 1
+                        logger.debug(f"Sent {len(pcm)}B to Teler (chunk {chunk_id})")
+                except Exception as e:
+                    logger.error(f"Error in g2t→teler: {e}")
 
             done, pending = await asyncio.wait(
-                [asyncio.create_task(_teler_to_gemini()), asyncio.create_task(_gemini_to_teler())],
+                [
+                    asyncio.create_task(_teler_to_t2g()),
+                    asyncio.create_task(_t2g_to_gemini()),
+                    asyncio.create_task(_gemini_to_g2t()),
+                    asyncio.create_task(_g2t_to_teler()),
+                ],
                 return_when=asyncio.FIRST_COMPLETED,
             )
             for task in pending:
@@ -232,6 +290,10 @@ async def run_session(websocket: WebSocket, system_prompt: str, initial_prompt: 
         if websocket.client_state != WebSocketState.DISCONNECTED:
             await websocket.close()
     finally:
-        transcript_q.put(None)  # signal transcript thread to flush and exit
+        if g2t_proc:
+            await _kill(g2t_proc)
+        if t2g_proc:
+            await _kill(t2g_proc)
+        transcript_q.put(None)
         _save_recording(session_id, bytes(teler_buf), bytes(gemini_buf))
         logger.info("Connection closed.")
