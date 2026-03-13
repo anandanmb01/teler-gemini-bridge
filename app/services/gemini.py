@@ -130,6 +130,7 @@ async def run_session(websocket: WebSocket, system_prompt: str, initial_prompt: 
 
             audio_chunks: list[bytes] = []
             chunk_id = 1
+            gemini_speaking = False  # echo gate: True while Gemini is outputting audio
 
             async def _teler_to_gemini():
                 try:
@@ -139,10 +140,13 @@ async def run_session(websocket: WebSocket, system_prompt: str, initial_prompt: 
                             try:
                                 pcm = base64.b64decode(data["data"]["audio_b64"])
                                 teler_buf.extend(pcm)
-                                await session.send_realtime_input(
-                                    audio=types.Blob(data=pcm, mime_type="audio/pcm;rate=16000")
-                                )
-                                logger.debug(f"Sent audio to Gemini ({len(pcm)} bytes)")
+                                if not gemini_speaking:
+                                    await session.send_realtime_input(
+                                        audio=types.Blob(data=pcm, mime_type="audio/pcm")
+                                    )
+                                    logger.debug(f"Sent audio to Gemini ({len(pcm)} bytes)")
+                                else:
+                                    logger.debug("Echo gate: dropping Teler audio while Gemini is speaking")
                             except Exception as e:
                                 logger.error(f"Error sending audio to Gemini: {e}")
                 except WebSocketDisconnect:
@@ -151,7 +155,7 @@ async def run_session(websocket: WebSocket, system_prompt: str, initial_prompt: 
                     logger.error(f"Error in teler→gemini stream: {e}")
 
             async def _gemini_to_teler():
-                nonlocal chunk_id, audio_chunks
+                nonlocal chunk_id, audio_chunks, gemini_speaking
                 try:
                     while True:
                         try:
@@ -171,6 +175,7 @@ async def run_session(websocket: WebSocket, system_prompt: str, initial_prompt: 
                                         return
 
                                 if response.data is not None:
+                                    gemini_speaking = True
                                     gemini_buf.extend(response.data)
                                     audio_chunks.append(response.data)
                                     logger.debug(f"Received Gemini audio chunk ({len(response.data)} bytes)")
@@ -197,10 +202,10 @@ async def run_session(websocket: WebSocket, system_prompt: str, initial_prompt: 
                                     if sc.output_transcription and sc.output_transcription.text:
                                         transcript_q.put(f"[Agent]: {sc.output_transcription.text}\n")
                                     if getattr(sc, 'turn_complete', False):
-                                        # Model was interrupted or finished — discard buffered audio
-                                        # so stale chunks don't play after the interruption point.
+                                        # Turn complete — Gemini stopped speaking, open echo gate
+                                        gemini_speaking = False
                                         audio_chunks = []
-                                        logger.debug("Turn complete — audio buffer cleared")
+                                        logger.debug("Turn complete — echo gate open, audio buffer cleared")
 
                         except Exception as e:
                             logger.debug(f"Session iteration ended: {e}")
