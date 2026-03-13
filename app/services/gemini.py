@@ -17,9 +17,11 @@ logger = logging.getLogger(__name__)
 _HANGUP_TOOL = {
     "name": "hangup_call",
     "description": (
-        "Immediately terminate and end the current phone call conversation. "
-        "Use this when you are done with the purpose of the call or user explicitly "
-        "requests to hang up, end the call, or disconnect."
+        "Terminate and disconnect the current phone call. "
+        "You MUST call this tool to end the call — do NOT just say goodbye without calling it. "
+        "Call this when: (1) the conversation purpose is complete, (2) the caller asks to hang up, "
+        "end the call, disconnect, or says goodbye, (3) you have nothing more to assist with. "
+        "After calling this tool the call will be disconnected immediately."
     )
 }
 
