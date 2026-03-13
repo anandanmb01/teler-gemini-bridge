@@ -49,16 +49,16 @@ def _save_recording(session_id: str, teler_pcm: bytes, gemini_pcm: bytes) -> Non
     threading.Thread(target=_worker, daemon=True).start()
 
 
-_HANGUP_TOOL = {
-    "name": "hangup_call",
-    "description": (
+_HANGUP_TOOL = types.FunctionDeclaration(
+    name="hangup_call",
+    description=(
         "Terminate and disconnect the current phone call. "
         "You MUST call this tool to end the call — do NOT just say goodbye without calling it. "
         "Call this when: (1) the conversation purpose is complete, (2) the caller asks to hang up, "
         "end the call, disconnect, or says goodbye, (3) you have nothing more to assist with. "
         "After calling this tool the call will be disconnected immediately."
-    )
-}
+    ),
+)
 
 
 async def run_session(websocket: WebSocket, system_prompt: str, initial_prompt: str) -> None:
@@ -73,18 +73,26 @@ async def run_session(websocket: WebSocket, system_prompt: str, initial_prompt: 
             await websocket.close(code=1008, reason="GOOGLE_API_KEY not configured")
             return
 
-        client = genai.Client(api_key=settings.google_api_key)
-        config = {
-            "response_modalities": ["AUDIO"],
-            "system_instruction": system_prompt,
-            "speech_config": {
-                "voice_config": {"prebuilt_voice_config": {"voice_name": "Aoede"}}
-            },
-            "thinking_config": {"thinking_budget": 0},
-            "tools": [{"function_declarations": [_HANGUP_TOOL]}],
-        }
+        client = genai.Client(
+            api_key=settings.google_api_key,
+            http_options={"api_version": "v1beta"},
+        )
+        config = types.LiveConnectConfig(
+            response_modalities=[types.Modality.AUDIO],
+            system_instruction=system_prompt,
+            speech_config=types.SpeechConfig(
+                voice_config=types.VoiceConfig(
+                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Aoede")
+                )
+            ),
+            context_window_compression=types.ContextWindowCompressionConfig(
+                trigger_tokens=104857,
+                sliding_window=types.SlidingWindow(target_tokens=52428),
+            ),
+            tools=[types.Tool(function_declarations=[_HANGUP_TOOL])],
+        )
 
-        async with client.aio.live.connect(model=settings.gemini_model, config=config) as session:  # type: ignore
+        async with client.aio.live.connect(model=settings.gemini_model, config=config) as session:
             logger.info("Connected to Gemini Live session")
 
             if initial_prompt:
@@ -153,11 +161,11 @@ async def run_session(websocket: WebSocket, system_prompt: str, initial_prompt: 
                                         except Exception as e:
                                             logger.error(f"Error processing audio chunks: {e}")
 
-                                if response.server_content and (
-                                    getattr(response.server_content, 'turn_complete', False) or
-                                    getattr(response.server_content, 'generation_complete', False)
-                                ):
-                                    logger.debug("Turn complete — waiting for next")
+                                if response.server_content and getattr(response.server_content, 'turn_complete', False):
+                                    # Model was interrupted or finished — discard buffered audio
+                                    # so stale chunks don't play after the interruption point.
+                                    audio_chunks = []
+                                    logger.debug("Turn complete — audio buffer cleared")
 
                         except Exception as e:
                             logger.debug(f"Session iteration ended: {e}")
