@@ -13,7 +13,6 @@ from app.config import settings
 from app.utils.audio import AudioResampler
 
 logger = logging.getLogger(__name__)
-_audio_resampler = AudioResampler()
 
 _HANGUP_TOOL = {
     "name": "hangup_call",
@@ -27,6 +26,7 @@ _HANGUP_TOOL = {
 
 async def run_session(websocket: WebSocket, system_prompt: str, initial_prompt: str) -> None:
     """Run a Gemini Live session bridged to a Teler WebSocket."""
+    resampler = AudioResampler()
     logger.info("WebSocket connected.")
     try:
         if not settings.google_api_key:
@@ -98,7 +98,7 @@ async def run_session(websocket: WebSocket, system_prompt: str, initial_prompt: 
                                     if len(audio_chunks) >= settings.gemini_audio_chunk_count:
                                         try:
                                             combined = b"".join(audio_chunks)
-                                            downsampled = _audio_resampler.downsample(combined, 24000)
+                                            downsampled = resampler.downsample(combined)
                                             await websocket.send_json({
                                                 "type": "audio",
                                                 "audio_b64": base64.b64encode(downsampled).decode(),
