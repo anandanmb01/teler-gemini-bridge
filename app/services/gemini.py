@@ -175,7 +175,6 @@ async def run_session(websocket: WebSocket, system_prompt: str, initial_prompt: 
                     await task
 
             logger.info("Bridge session closed")
-            _save_recording(session_id, bytes(teler_buf), bytes(gemini_buf))
 
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected.")
@@ -184,4 +183,5 @@ async def run_session(websocket: WebSocket, system_prompt: str, initial_prompt: 
         if websocket.client_state != WebSocketState.DISCONNECTED:
             await websocket.close()
     finally:
+        _save_recording(session_id, bytes(teler_buf), bytes(gemini_buf))
         logger.info("Connection closed.")
