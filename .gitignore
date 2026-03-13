@@ -203,5 +203,6 @@ local_settings.py
 .env.test
 .env.production
 
-# Audio recordings
+# Audio recordings & transcripts
 /tmp/audiorecord/
+/tmp/transcript/

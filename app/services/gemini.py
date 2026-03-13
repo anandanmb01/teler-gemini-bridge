@@ -18,6 +18,7 @@ from app.config import settings
 from app.utils.audio import AudioResampler
 
 _RECORD_DIR = Path("/tmp/audiorecord")
+_TRANSCRIPT_DIR = Path("/tmp/transcript")
 
 logger = logging.getLogger(__name__)
 
@@ -57,12 +58,22 @@ def _save_recording(caller_chunks: list[bytes], gemini_chunks: list[bytes], path
     logger.info(f"Recording saved: {path}")
 
 
+def _save_transcript(lines: list[str], path: Path) -> None:
+    """Write transcript lines to a text file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines), encoding="utf-8")
+    logger.info(f"Transcript saved: {path}")
+
+
 async def run_session(websocket: WebSocket, system_prompt: str, initial_prompt: str) -> None:
     """Run a Gemini Live session bridged to a Teler WebSocket."""
     resampler = AudioResampler()
-    record_path = _RECORD_DIR / f"{uuid.uuid4()}.wav"
+    session_id = str(uuid.uuid4())
+    record_path = _RECORD_DIR / f"{session_id}.wav"
+    transcript_path = _TRANSCRIPT_DIR / f"{session_id}.txt"
     caller_audio: list[bytes] = []
     gemini_audio: list[bytes] = []
+    transcript_lines: list[str] = []
     logger.info("WebSocket connected.")
     try:
         if not settings.google_api_key:
@@ -77,6 +88,8 @@ async def run_session(websocket: WebSocket, system_prompt: str, initial_prompt: 
                 "voice_config": {"prebuilt_voice_config": {"voice_name": "Aoede"}}
             },
             "tools": [{"function_declarations": [_HANGUP_TOOL]}],
+            "input_audio_transcription": {},
+            "output_audio_transcription": {},
         }
 
         async with client.aio.live.connect(model=settings.gemini_model, config=config) as session:  # type: ignore
@@ -148,11 +161,18 @@ async def run_session(websocket: WebSocket, system_prompt: str, initial_prompt: 
                                         except Exception as e:
                                             logger.error(f"Error processing audio chunks: {e}")
 
-                                if response.server_content and (
-                                    getattr(response.server_content, 'turn_complete', False) or
-                                    getattr(response.server_content, 'generation_complete', False)
-                                ):
-                                    logger.debug("Turn complete — waiting for next")
+                                if response.server_content:
+                                    sc = response.server_content
+                                    if getattr(sc, 'input_transcription', None) and sc.input_transcription.text:
+                                        line = f"[CALLER]: {sc.input_transcription.text.strip()}"
+                                        transcript_lines.append(line)
+                                        logger.debug(line)
+                                    if getattr(sc, 'output_transcription', None) and sc.output_transcription.text:
+                                        line = f"[GEMINI]: {sc.output_transcription.text.strip()}"
+                                        transcript_lines.append(line)
+                                        logger.debug(line)
+                                    if getattr(sc, 'turn_complete', False) or getattr(sc, 'generation_complete', False):
+                                        logger.debug("Turn complete — waiting for next")
 
                         except Exception as e:
                             logger.debug(f"Session iteration ended: {e}")
@@ -174,6 +194,10 @@ async def run_session(websocket: WebSocket, system_prompt: str, initial_prompt: 
                 _save_recording(caller_audio, gemini_audio, record_path)
             except Exception as e:
                 logger.error(f"Failed to save recording: {e}")
+            try:
+                _save_transcript(transcript_lines, transcript_path)
+            except Exception as e:
+                logger.error(f"Failed to save transcript: {e}")
 
             logger.info("Bridge session closed")
 
