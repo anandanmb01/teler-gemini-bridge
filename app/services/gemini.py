@@ -100,7 +100,7 @@ async def run_session(websocket: WebSocket, system_prompt: str, initial_prompt: 
                         if data.get("type") == "audio":
                             try:
                                 pcm = base64.b64decode(data["data"]["audio_b64"])
-                                teler_buf += pcm
+                                teler_buf.extend(pcm)
                                 await session.send_realtime_input(
                                     audio=types.Blob(data=pcm, mime_type="audio/pcm;rate=16000")
                                 )
@@ -133,7 +133,7 @@ async def run_session(websocket: WebSocket, system_prompt: str, initial_prompt: 
                                         return
 
                                 if response.data is not None:
-                                    gemini_buf += response.data
+                                    gemini_buf.extend(response.data)
                                     audio_chunks.append(response.data)
                                     logger.debug(f"Received Gemini audio chunk ({len(response.data)} bytes)")
 
