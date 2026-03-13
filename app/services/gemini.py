@@ -80,6 +80,7 @@ async def run_session(websocket: WebSocket, system_prompt: str, initial_prompt: 
             "speech_config": {
                 "voice_config": {"prebuilt_voice_config": {"voice_name": "Aoede"}}
             },
+            "thinking_config": {"thinking_budget": 0},
             "tools": [{"function_declarations": [_HANGUP_TOOL]}],
         }
 
