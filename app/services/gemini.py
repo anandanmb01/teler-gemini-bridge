@@ -4,6 +4,7 @@ import contextlib
 import json
 import logging
 import os
+import queue as _queue
 import threading
 import uuid
 import wave
@@ -21,7 +22,25 @@ from app.utils.audio import AudioResampler
 logger = logging.getLogger(__name__)
 
 _AUDIO_REC_DIR = "/tmp/audio_rec"
+_TRANSCRIPT_DIR = "/tmp/transcription"
 os.makedirs(_AUDIO_REC_DIR, exist_ok=True)
+os.makedirs(_TRANSCRIPT_DIR, exist_ok=True)
+
+
+def _run_transcript_writer(session_id: str, q: "_queue.Queue[str | None]") -> None:
+    """Background thread: drains transcript queue and writes lines to <uuid>.txt."""
+    path = os.path.join(_TRANSCRIPT_DIR, f"{session_id}.txt")
+    try:
+        with open(path, "w") as f:
+            while True:
+                line = q.get()
+                if line is None:  # sentinel — session ended
+                    break
+                f.write(line)
+                f.flush()
+        logger.info(f"Saved transcript: {path}")
+    except Exception as e:
+        logger.error(f"Transcript write failed: {e}")
 
 
 def _save_recording(session_id: str, teler_pcm: bytes, gemini_pcm: bytes) -> None:
@@ -67,6 +86,11 @@ async def run_session(websocket: WebSocket, system_prompt: str, initial_prompt: 
     session_id = str(uuid.uuid4())
     teler_buf: bytearray = bytearray()
     gemini_buf: bytearray = bytearray()
+    transcript_q: "_queue.Queue[str | None]" = _queue.Queue()
+    transcript_thread = threading.Thread(
+        target=_run_transcript_writer, args=(session_id, transcript_q), daemon=True
+    )
+    transcript_thread.start()
     logger.info(f"WebSocket connected. session={session_id}")
     try:
         if not settings.google_api_key:
@@ -89,6 +113,8 @@ async def run_session(websocket: WebSocket, system_prompt: str, initial_prompt: 
                 trigger_tokens=104857,
                 sliding_window=types.SlidingWindow(target_tokens=52428),
             ),
+            input_audio_transcription=types.AudioTranscriptionConfig(),
+            output_audio_transcription=types.AudioTranscriptionConfig(),
             tools=[types.Tool(function_declarations=[_HANGUP_TOOL])],
         )
 
@@ -161,11 +187,17 @@ async def run_session(websocket: WebSocket, system_prompt: str, initial_prompt: 
                                         except Exception as e:
                                             logger.error(f"Error processing audio chunks: {e}")
 
-                                if response.server_content and getattr(response.server_content, 'turn_complete', False):
-                                    # Model was interrupted or finished — discard buffered audio
-                                    # so stale chunks don't play after the interruption point.
-                                    audio_chunks = []
-                                    logger.debug("Turn complete — audio buffer cleared")
+                                if response.server_content:
+                                    sc = response.server_content
+                                    if sc.input_transcription and sc.input_transcription.text:
+                                        transcript_q.put(f"[Caller]: {sc.input_transcription.text}\n")
+                                    if sc.output_transcription and sc.output_transcription.text:
+                                        transcript_q.put(f"[Agent]: {sc.output_transcription.text}\n")
+                                    if getattr(sc, 'turn_complete', False):
+                                        # Model was interrupted or finished — discard buffered audio
+                                        # so stale chunks don't play after the interruption point.
+                                        audio_chunks = []
+                                        logger.debug("Turn complete — audio buffer cleared")
 
                         except Exception as e:
                             logger.debug(f"Session iteration ended: {e}")
@@ -192,5 +224,6 @@ async def run_session(websocket: WebSocket, system_prompt: str, initial_prompt: 
         if websocket.client_state != WebSocketState.DISCONNECTED:
             await websocket.close()
     finally:
+        transcript_q.put(None)  # signal transcript thread to flush and exit
         _save_recording(session_id, bytes(teler_buf), bytes(gemini_buf))
         logger.info("Connection closed.")
