@@ -3,16 +3,51 @@ import base64
 import contextlib
 import json
 import logging
+import os
+import threading
+import uuid
+import wave
 
+import numpy as np
 from fastapi import WebSocket, WebSocketDisconnect
 from fastapi.websockets import WebSocketState
 from google import genai
 from google.genai import types
+from scipy.signal import resample_poly
 
 from app.config import settings
 from app.utils.audio import AudioResampler
 
 logger = logging.getLogger(__name__)
+
+_AUDIO_REC_DIR = "/tmp/audio_rec"
+os.makedirs(_AUDIO_REC_DIR, exist_ok=True)
+
+
+def _save_recording(session_id: str, teler_pcm: bytes, gemini_pcm: bytes) -> None:
+    """Mix both audio streams to mono 16kHz WAV and write to disk (background thread)."""
+    def _worker():
+        try:
+            os.makedirs(_AUDIO_REC_DIR, exist_ok=True)
+            teler = np.frombuffer(teler_pcm, dtype=np.int16).astype(np.float32)
+            gemini_raw = np.frombuffer(gemini_pcm, dtype=np.int16).astype(np.float32)
+            gemini = resample_poly(gemini_raw, 2, 3)  # 24kHz → 16kHz
+            n = max(len(teler), len(gemini))
+            teler = np.pad(teler, (0, n - len(teler)))
+            gemini = np.pad(gemini, (0, n - len(gemini)))
+            mixed = np.clip((teler + gemini) / 2, -32768, 32767).astype(np.int16)
+            path = os.path.join(_AUDIO_REC_DIR, f"{session_id}.wav")
+            with wave.open(path, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(16000)
+                wf.writeframes(mixed.tobytes())
+            logger.info(f"Saved recording: {path}")
+        except Exception as e:
+            logger.error(f"Recording save failed: {e}")
+
+    threading.Thread(target=_worker, daemon=True).start()
+
 
 _HANGUP_TOOL = {
     "name": "hangup_call",
@@ -29,7 +64,10 @@ _HANGUP_TOOL = {
 async def run_session(websocket: WebSocket, system_prompt: str, initial_prompt: str) -> None:
     """Run a Gemini Live session bridged to a Teler WebSocket."""
     resampler = AudioResampler()
-    logger.info("WebSocket connected.")
+    session_id = str(uuid.uuid4())
+    teler_buf: bytearray = bytearray()
+    gemini_buf: bytearray = bytearray()
+    logger.info(f"WebSocket connected. session={session_id}")
     try:
         if not settings.google_api_key:
             await websocket.close(code=1008, reason="GOOGLE_API_KEY not configured")
@@ -62,6 +100,7 @@ async def run_session(websocket: WebSocket, system_prompt: str, initial_prompt: 
                         if data.get("type") == "audio":
                             try:
                                 pcm = base64.b64decode(data["data"]["audio_b64"])
+                                teler_buf += pcm
                                 await session.send_realtime_input(
                                     audio=types.Blob(data=pcm, mime_type="audio/pcm;rate=16000")
                                 )
@@ -94,6 +133,7 @@ async def run_session(websocket: WebSocket, system_prompt: str, initial_prompt: 
                                         return
 
                                 if response.data is not None:
+                                    gemini_buf += response.data
                                     audio_chunks.append(response.data)
                                     logger.debug(f"Received Gemini audio chunk ({len(response.data)} bytes)")
 
@@ -135,6 +175,7 @@ async def run_session(websocket: WebSocket, system_prompt: str, initial_prompt: 
                     await task
 
             logger.info("Bridge session closed")
+            _save_recording(session_id, bytes(teler_buf), bytes(gemini_buf))
 
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected.")
