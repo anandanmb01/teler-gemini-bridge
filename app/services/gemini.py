@@ -31,14 +31,16 @@ def _run_transcript_writer(session_id: str, q: "_queue.Queue[str | None]") -> No
     """Background thread: drains transcript queue and writes lines to <uuid>.txt."""
     path = os.path.join(_TRANSCRIPT_DIR, f"{session_id}.txt")
     try:
+        os.makedirs(_TRANSCRIPT_DIR, exist_ok=True)
         with open(path, "w") as f:
+            logger.info(f"Transcript file opened: {path}")
             while True:
                 line = q.get()
                 if line is None:  # sentinel — session ended
                     break
                 f.write(line)
                 f.flush()
-        logger.info(f"Saved transcript: {path}")
+        logger.info(f"Transcript saved: {path}")
     except Exception as e:
         logger.error(f"Transcript write failed: {e}")
 
@@ -48,6 +50,7 @@ def _save_recording(session_id: str, teler_pcm: bytes, gemini_pcm: bytes) -> Non
     def _worker():
         try:
             os.makedirs(_AUDIO_REC_DIR, exist_ok=True)
+            logger.info(f"Saving recording for session={session_id} teler={len(teler_pcm)}B gemini={len(gemini_pcm)}B")
             teler = np.frombuffer(teler_pcm, dtype=np.int16).astype(np.float32)
             gemini_raw = np.frombuffer(gemini_pcm, dtype=np.int16).astype(np.float32)
             gemini = resample_poly(gemini_raw, 2, 3)  # 24kHz → 16kHz
